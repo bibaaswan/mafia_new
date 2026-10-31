@@ -34,6 +34,9 @@
   th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:normal; }
   .hidden { display:none; } .scroll { overflow-x:auto; }
+  .dead { text-decoration:line-through; opacity:.6; }
+  .check { display:flex; align-items:center; gap:8px; margin:6px 0; color:var(--text); font-size:1rem; }
+  .check input { width:auto; }
 </style>
 </head>
 <body>
@@ -66,8 +69,10 @@
     <div class="panel hidden" id="playerPanel">
       <h2 id="promptTitle"></h2>
       <div id="pickBox">
-        <label for="pick">Choose a player</label>
+        <label for="pick" id="pickLabel">Choose a player</label>
         <select id="pick"></select>
+        <label for="pick2" id="pick2Label">Second player</label>
+        <select id="pick2"></select>
         <button id="submitBtn">Submit</button>
       </div>
       <p class="note" id="mySub"></p>
@@ -84,6 +89,13 @@
       </div>
       <p class="note" id="progress"></p>
       <p class="error" id="hostErr"></p>
+    </div>
+    <div class="panel hidden" id="resolvePanel">
+      <h2 id="resolveTitle"></h2>
+      <div id="resolveChecks"></div>
+      <p class="note">Leave everyone unticked if nobody.</p>
+      <button id="resolveBtn"></button>
+      <p class="error" id="resolveErr"></p>
     </div>
     <div class="panel hidden" id="rolesPanel">
       <h2>Roles</h2>
@@ -122,12 +134,34 @@ async function post(path, data) {
   if (!r.ok) throw new Error(j.error || 'Something went wrong.');
   return j;
 }
+let deadSet = new Set();
+function fillNames(el, text) {          // strike out dead players' names; handles "A + B"
+  el.textContent = '';
+  String(text).split(' + ').forEach((n, i) => {
+    if (i) el.appendChild(document.createTextNode(' + '));
+    const sp = document.createElement('span'); sp.textContent = n;
+    if (deadSet.has(n)) sp.className = 'dead';
+    el.appendChild(sp);
+  });
+}
 function table(heads, rows) {
   const t = document.createElement('table');
-  const h = t.insertRow();
-  heads.forEach(x => { const th = document.createElement('th'); th.textContent = x; h.appendChild(th); });
-  rows.forEach(r => { const row = t.insertRow(); r.forEach(x => (row.insertCell().textContent = x)); });
+  const hd = t.insertRow();
+  heads.forEach(x => { const th = document.createElement('th'); th.textContent = x; hd.appendChild(th); });
+  rows.forEach(r => { const row = t.insertRow(); r.forEach(x => fillNames(row.insertCell(), x)); });
   return t;
+}
+function fillChecks(box, names) {
+  const key = names.join('|');
+  if (box.dataset.key === key) return;
+  const on = new Set([...box.querySelectorAll('input:checked')].map(i => i.value));
+  box.innerHTML = '';
+  names.forEach(n => {
+    const l = document.createElement('label'); l.className = 'check';
+    const i = document.createElement('input'); i.type = 'checkbox'; i.value = n; i.checked = on.has(n);
+    l.appendChild(i); l.appendChild(document.createTextNode(n)); box.appendChild(l);
+  });
+  box.dataset.key = key;
 }
 // rebuild a dropdown only when its options change, so a pending choice isn't lost
 function fillSelect(sel, items) {
@@ -165,12 +199,21 @@ function connect() {
 
 // ---------- rendering ----------
 function render(s) {
-  $('who').textContent = s.isHost ? 'Host' : s.me;
+  deadSet = new Set(s.dead);
+  fillNames($('who'), s.isHost ? 'Host' : s.me);
   $('roleLine').textContent = s.myRole ? 'Your role: ' + s.myRole : '';
   const ph = $('phase');
   ph.textContent = s.kind === 'lobby' ? 'Lobby — waiting for the host to start Day 0' : s.label + (s.open ? ' — open' : ' — closed');
   ph.className = 'status ' + (s.open ? 'open' : 'closed');
-  $('onlineLine').textContent = 'Online (' + s.online.length + '): ' + (s.online.join(', ') || 'nobody yet');
+  const ol = $('onlineLine');
+  ol.textContent = 'Online (' + s.online.length + '): ';
+  if (!s.online.length) ol.appendChild(document.createTextNode('nobody yet'));
+  s.online.forEach((n, i) => {
+    if (i) ol.appendChild(document.createTextNode(', '));
+    const sp = document.createElement('span'); sp.textContent = n;
+    if (deadSet.has(n)) sp.className = 'dead';
+    ol.appendChild(sp);
+  });
 
   const p = !s.isHost, h = s.isHost;
   $('playerPanel').classList.toggle('hidden', !p || s.kind === 'lobby');
@@ -178,38 +221,57 @@ function render(s) {
   ['hostPanel', 'rolesPanel'].forEach(id => $(id).classList.toggle('hidden', !h));
   $('livePanel').classList.toggle('hidden', !(h && s.open && s.kind !== 'role'));
   $('replyPanel').classList.toggle('hidden', !(h && s.open && s.kind === 'night'));
+  $('resolvePanel').classList.toggle('hidden', !(h && s.needsResolve));
   $('history').innerHTML = '';
   if (p) renderPlayer(s); else renderHost(s);
 }
 
 function renderPlayer(s) {
-  const isRole = s.kind === 'role';
-  $('promptTitle').textContent = isRole ? s.label : s.label + ': choose a player';
-  $('pickBox').classList.toggle('hidden', isRole);
-  fillSelect($('pick'), s.online);
+  const inp = s.input, isRole = s.kind === 'role', canAct = inp.type !== 'none';
+  $('promptTitle').textContent = s.label + (canAct ? ': ' + inp.title : '');
+  $('pickBox').classList.toggle('hidden', !canAct);
+  if (canAct) {
+    const two = inp.type === 'pick' && inp.count === 2;
+    $('pickLabel').textContent = inp.type === 'choice' ? 'Your choice' : two ? 'First player' : inp.title;
+    fillSelect($('pick'), inp.options);
+    $('pick2Label').classList.toggle('hidden', !two);
+    $('pick2').classList.toggle('hidden', !two);
+    if (two) fillSelect($('pick2'), inp.options);
+  }
   $('submitBtn').disabled = !s.open;
   $('mySub').textContent = isRole ? 'The host is setting up roles. You will see yours when Night 1 starts.'
+    : !canAct ? (inp.why || 'Nothing to do this round.')
     : !s.open ? 'This round is closed. Wait for the host to open the next one.'
     : s.mySub ? 'Submitted: ' + s.mySub + ' (you can change it until the round ends)' : 'Nothing submitted yet.';
   $('msgs').innerHTML = '';
   s.msgs.slice().reverse().forEach(m => {
     const d = document.createElement('div'); d.className = 'msg';
-    const b = document.createElement('b'); b.textContent = m.label + ': ';
-    d.appendChild(b); d.appendChild(document.createTextNode(m.text)); $('msgs').appendChild(d);
+    const bb = document.createElement('b'); bb.textContent = m.label + ': ';
+    d.appendChild(bb); d.appendChild(document.createTextNode(m.text)); $('msgs').appendChild(d);
   });
 }
 $('submitBtn').onclick = async () => {
   $('subErr').textContent = '';
-  try { await post('/api/submit', { value: $('pick').value }); } catch (e) { $('subErr').textContent = e.message; }
+  const inp = last.input, vals = [$('pick').value];
+  if (inp.type === 'pick' && inp.count === 2) vals.push($('pick2').value);
+  try { await post('/api/submit', { values: vals }); } catch (e) { $('subErr').textContent = e.message; }
 };
 
 function renderHost(s) {
   $('startBtn').textContent = 'Start ' + s.nextLabel;
-  $('startBtn').disabled = s.open;
+  $('startBtn').disabled = s.open || s.needsResolve;
   $('endBtn').disabled = !s.open;
   $('progress').textContent = s.open
-    ? 'Submitted so far: ' + Object.keys(s.submissions).length + ' of ' + s.people.length
-    : 'No round is open.';
+    ? 'Submitted so far: ' + Object.keys(s.submissions).length + ' (' + s.alive.length + ' players alive)'
+    : s.needsResolve ? 'Record the result below, then start the next round.' : 'No round is open.';
+
+  // record deaths (after a night) or the vote-out (after a day)
+  if (s.needsResolve) {
+    const night = s.kind === 'night';
+    $('resolveTitle').textContent = night ? 'Who died tonight?' : 'Who was voted out?';
+    $('resolveBtn').textContent = night ? 'Confirm deaths' : 'Confirm vote-out';
+    fillChecks($('resolveChecks'), s.alive);
+  }
 
   // roles
   $('roleSetup').classList.toggle('hidden', s.idx > 0);
@@ -225,7 +287,7 @@ function renderHost(s) {
   $('live').appendChild(table(['Sender', 'Role', 'Selected'], s.people.map(n => [n, s.roles[n] || '—', s.submissions[n] || '—'])));
 
   // reply form
-  fillSelect($('replyTo'), s.people);
+  fillSelect($('replyTo'), s.alive);
   $('sentLog').textContent = s.sent.slice(-8).reverse().map(m => m.label + ' → ' + m.to + ': ' + m.text).join('\n');
   $('sentLog').style.whiteSpace = 'pre-wrap';
 
@@ -238,6 +300,14 @@ function renderHost(s) {
     panel.appendChild(wrap); $('history').appendChild(panel);
   });
 }
+$('resolveBtn').onclick = async () => {
+  $('resolveErr').textContent = '';
+  const names = [...$('resolveChecks').querySelectorAll('input:checked')].map(i => i.value);
+  try {
+    await post('/api/host/resolve', { names });
+    $('resolveChecks').innerHTML = ''; $('resolveChecks').dataset.key = '';
+  } catch (e) { $('resolveErr').textContent = e.message; }
+};
 $('roleList').oninput = () => { rolesDirty = true; };
 $('saveRoles').onclick = async () => {
   $('hostErr').textContent = '';
