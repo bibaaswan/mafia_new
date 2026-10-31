@@ -14,11 +14,31 @@ const sessions = {};      // token -> name
 const clients = new Set(); // { res, name }  (an open connection = "online")
 
 // Rounds go: Day 0 (roles), Night 1, Day 1, Night 2, Day 2, ...
-const game = { idx: -1, open: false, subs: {}, roles: {}, roleList: [], msgs: {}, sent: [], notice: '', history: [] };
+const game = { idx: -1, open: false, subs: {}, roles: {}, roleList: [], msgs: {}, sent: [], notice: '', dead: {}, resolved: true, history: [] };
 const kindOf = i => (i === 0 ? 'role' : i % 2 ? 'night' : 'day');
 const label = i => (i < 0 ? 'Lobby' : i === 0 ? 'Day 0' : i % 2 ? `Night ${(i + 1) / 2}` : `Day ${i / 2}`);
 const onlinePlayers = () => [...new Set([...clients].map(c => c.name))].filter(n => n !== 'host').sort();
 const people = () => [...new Set([...onlinePlayers(), ...Object.keys(game.roles)])].sort();
+
+const alive = () => onlinePlayers().filter(n => !game.dead[n]);
+const roleOf = n => (game.roles[n] || '').trim().toLowerCase();
+
+// What input (if any) does this player get in the current round?
+function inputFor(name) {
+  if (game.dead[name]) return { type: 'none', why: 'You are out of the game.' };
+  if (game.idx < 1) return { type: 'none' };
+  if (kindOf(game.idx) === 'day') return { type: 'pick', count: 1, options: alive(), title: 'Vote out' };
+  const role = roleOf(name);
+  if (!role) return { type: 'none', why: 'You have no role, so no action tonight.' };
+  if (['jester', 'executioner', 'villager'].includes(role)) return { type: 'none', why: 'Your role has no night action.' };
+  if (role === 'mayor') return { type: 'choice', options: ['Reveal', 'Do not reveal'], title: 'Reveal yourself?' };
+  if (role === 'pi') return { type: 'pick', count: 2, options: alive(), title: 'Choose two players' };
+  let options = alive();
+  if (role === 'doctor') options = options.filter(n => n !== name);
+  if (role === 'godfather') options = options.filter(n => roleOf(n) !== 'mafia');
+  if (role === 'mafia') options = options.filter(n => roleOf(n) !== 'godfather');
+  return { type: 'pick', count: 1, options, title: 'Choose a player' };
+}
 
 // Night 1: shuffle the host's role list and hand one to each online player
 function assignRoles() {
@@ -39,17 +59,20 @@ function stateFor(name) {
   const s = {
     me: name, isHost, idx: game.idx, label: label(game.idx),
     kind: game.idx < 0 ? 'lobby' : kindOf(game.idx),
-    open: game.open, online: onlinePlayers(),
+    open: game.open, online: onlinePlayers(), dead: Object.keys(game.dead),
   };
   if (isHost) {
     s.submissions = game.subs; s.roles = game.roles; s.roleList = game.roleList;
     s.notice = game.notice; s.sent = game.sent; s.people = people();
+    s.alive = people().filter(n => !game.dead[n]);
+    s.needsResolve = game.idx >= 1 && !game.open && !game.resolved;
     s.history = game.history;
     s.nextLabel = label(game.idx + 1);
   } else {
     s.mySub = game.subs[name] || null;
     s.myRole = game.roles[name] || null;
     s.msgs = game.msgs[name] || [];
+    s.input = inputFor(name);
   }
   return s;
 }
@@ -70,6 +93,7 @@ function endRound() {
     })),
   });
   game.open = false;
+  game.resolved = false; // host must record deaths / vote-out before the next round
 }
 
 const body = req => new Promise(ok => {
@@ -123,10 +147,13 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/api/submit') {
     if (name === 'host') return send(res, 403, { error: 'The host does not play.' });
     if (!game.open) return send(res, 400, { error: 'No round is open right now.' });
-    if (kindOf(game.idx) === 'role') return send(res, 400, { error: 'Roles are handed out at the start of Night 1.' });
-    const value = String(b.value || '').trim().slice(0, 30);
-    if (!onlinePlayers().includes(value)) return send(res, 400, { error: 'That player is not online.' });
-    game.subs[name] = value;
+    const spec = inputFor(name);
+    if (spec.type === 'none') return send(res, 400, { error: spec.why || 'You have no input this round.' });
+    const vals = (Array.isArray(b.values) ? b.values : []).map(String);
+    const need = spec.type === 'choice' ? 1 : spec.count;
+    if (vals.length !== need || new Set(vals).size !== need || !vals.every(v => spec.options.includes(v)))
+      return send(res, 400, { error: need === 2 ? 'Choose two different players.' : 'Choose a valid option.' });
+    game.subs[name] = vals.join(' + ');
     send(res, 200, { ok: true });
     return broadcast();
   }
@@ -135,6 +162,7 @@ http.createServer(async (req, res) => {
 
   if (url.pathname === '/api/host/start') {
     if (game.open) return send(res, 400, { error: 'End the current round first.' });
+    if (game.idx >= 1 && !game.resolved) return send(res, 400, { error: 'Record who died or was voted out first.' });
     const next = game.idx + 1;
     if (next === 1 && !game.roleList.length) return send(res, 400, { error: 'Enter the role list first (on Day 0).' });
     game.idx = next; game.subs = {}; game.open = true;
@@ -142,6 +170,12 @@ http.createServer(async (req, res) => {
   } else if (url.pathname === '/api/host/end') {
     if (!game.open) return send(res, 400, { error: 'No round is open.' });
     endRound();
+  } else if (url.pathname === '/api/host/resolve') {
+    if (game.open || game.idx < 1 || game.resolved) return send(res, 400, { error: 'Nothing to record right now.' });
+    const names = (Array.isArray(b.names) ? b.names : []).map(String).filter(n => people().includes(n) && !game.dead[n]);
+    const cause = kindOf(game.idx) === 'night' ? 'died' : 'voted out';
+    names.forEach(n => (game.dead[n] = { label: label(game.idx), cause }));
+    game.resolved = true;
   } else if (url.pathname === '/api/host/roles') {
     if (game.idx > 0) return send(res, 400, { error: 'Roles are locked once Night 1 has started.' });
     game.roleList = String(b.roles || '').split('\n').map(x => x.trim().slice(0, 30)).filter(Boolean).slice(0, 50);
