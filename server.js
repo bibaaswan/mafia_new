@@ -14,11 +14,11 @@ const sessions = {};      // token -> name
 const clients = new Set(); // { res, name }  (an open connection = "online")
 
 // Rounds go: Day 0 (roles), Night 1, Day 1, Night 2, Day 2, ...
-const game = { idx: -1, open: false, subs: {}, roles: {}, roleList: [], msgs: {}, sent: [], notice: '', dead: {}, resolved: true, history: [] };
+const game = { idx: -1, open: false, subs: {}, roles: {}, roleList: [], msgs: {}, sent: [], notice: '', dead: {}, resolved: true, history: [], roster: [] };
 const kindOf = i => (i === 0 ? 'role' : i % 2 ? 'night' : 'day');
-const label = i => (i < 0 ? 'Lobby' : i === 0 ? 'Day 0' : i % 2 ? `Night ${(i + 1) / 2}` : `Day ${i / 2}`);
+const label = i => (i < 0 ? 'Lobby' : i === 0 ? 'Start Game' : i % 2 ? `Night ${(i + 1) / 2}` : `Day ${i / 2}`);
 const onlinePlayers = () => [...new Set([...clients].map(c => c.name))].filter(n => n !== 'host').sort();
-const people = () => [...new Set([...onlinePlayers(), ...Object.keys(game.roles)])].sort();
+const people = () => (game.idx >= 0 ? [...game.roster].sort() : onlinePlayers());
 
 const alive = () => onlinePlayers().filter(n => !game.dead[n]);
 const roleOf = n => (game.roles[n] || '').trim().toLowerCase();
@@ -26,13 +26,14 @@ const roleOf = n => (game.roles[n] || '').trim().toLowerCase();
 // What input (if any) does this player get in the current round?
 function inputFor(name) {
   if (game.dead[name]) return { type: 'none', why: 'You are out of the game.' };
+  if (game.idx >= 0 && !game.roster.includes(name)) return { type: 'none', why: 'You are not in this game.' };
   if (game.idx < 1) return { type: 'none' };
   if (kindOf(game.idx) === 'day') return { type: 'pick', count: 1, options: alive(), title: 'Vote out' };
   const role = roleOf(name);
   if (!role) return { type: 'none', why: 'You have no role, so no action tonight.' };
   if (['jester', 'executioner', 'villager'].includes(role)) return { type: 'none', why: 'Your role has no night action.' };
   if (role === 'mayor') return { type: 'choice', options: ['Reveal', 'Do not reveal'], title: 'Reveal yourself?' };
-  if (role === 'pi') return { type: 'pick', count: 2, options: alive(), title: 'Choose two players' };
+  if (role === 'pi') return { type: 'pick', count: 2, options: alive().filter(n => n !== name), title: 'Choose two players' };
   let options = alive();
   if (role === 'doctor') options = options.filter(n => n !== name);
   if (role === 'godfather') options = options.filter(n => roleOf(n) !== 'mafia');
@@ -42,7 +43,7 @@ function inputFor(name) {
 
 // Night 1: shuffle the host's role list and hand one to each online player
 function assignRoles() {
-  const players = onlinePlayers(), pool = [...game.roleList];
+  const players = game.roster, pool = [...game.roleList];
   for (let i = pool.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [pool[i], pool[j]] = [pool[j], pool[i]];
@@ -106,13 +107,14 @@ http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://x');
 
   if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/index.html')) {
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
     return res.end(fs.readFileSync(path.join(__dirname, 'index.html')));
   }
 
   if (req.method === 'GET' && url.pathname === '/api/events') {
     const name = sessions[url.searchParams.get('token')];
     if (!name) { res.writeHead(401); return res.end(); }
+    if (name !== 'host' && game.idx >= 0 && !game.roster.includes(name)) { res.writeHead(403); return res.end(); }
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     const client = { res, name };
     clients.add(client);
@@ -126,6 +128,8 @@ http.createServer(async (req, res) => {
   if (url.pathname === '/api/login') {
     const name = String(b.name || '').trim().slice(0, 20), pw = String(b.password || '');
     if (!name || pw.length < 3) return send(res, 400, { error: 'Enter a name and a password of at least 3 characters.' });
+    if (name.toLowerCase() !== 'host' && game.idx >= 0 && !game.roster.includes(name))
+      return send(res, 403, { error: 'A game is already running. Please wait for the next one.' });
     if (name.toLowerCase() === 'host') {
       if (pw !== HOST_PASSWORD) return send(res, 401, { error: 'Wrong host password.' });
     } else if (users[name]) {
@@ -164,7 +168,12 @@ http.createServer(async (req, res) => {
     if (game.open) return send(res, 400, { error: 'End the current round first.' });
     if (game.idx >= 1 && !game.resolved) return send(res, 400, { error: 'Record who died or was voted out first.' });
     const next = game.idx + 1;
-    if (next === 1 && !game.roleList.length) return send(res, 400, { error: 'Enter the role list first (on Day 0).' });
+    if (next === 0) {
+      const p = onlinePlayers();
+      if (!p.length) return send(res, 400, { error: 'No players are online yet.' });
+      game.roster = p;
+    }
+    if (next === 1 && !game.roleList.length) return send(res, 400, { error: 'Enter the role list first (during Start Game).' });
     game.idx = next; game.subs = {}; game.open = true;
     if (next === 1) assignRoles();
   } else if (url.pathname === '/api/host/end') {
@@ -176,6 +185,8 @@ http.createServer(async (req, res) => {
     const cause = kindOf(game.idx) === 'night' ? 'died' : 'voted out';
     names.forEach(n => (game.dead[n] = { label: label(game.idx), cause }));
     game.resolved = true;
+  } else if (url.pathname === '/api/host/endgame') {
+    Object.assign(game, { idx: -1, open: false, subs: {}, roles: {}, msgs: {}, sent: [], notice: '', dead: {}, resolved: true, history: [], roster: [] });
   } else if (url.pathname === '/api/host/roles') {
     if (game.idx > 0) return send(res, 400, { error: 'Roles are locked once Night 1 has started.' });
     game.roleList = String(b.roles || '').split('\n').map(x => x.trim().slice(0, 30)).filter(Boolean).slice(0, 50);
