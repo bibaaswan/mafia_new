@@ -86,6 +86,7 @@
       <div class="row">
         <button id="startBtn"></button>
         <button id="endBtn" class="stop">End round</button>
+        <button id="endGameBtn" class="alt hidden">End game</button>
       </div>
       <p class="note" id="progress"></p>
       <p class="error" id="hostErr"></p>
@@ -203,7 +204,7 @@ function render(s) {
   fillNames($('who'), s.isHost ? 'Host' : s.me);
   $('roleLine').textContent = s.myRole ? 'Your role: ' + s.myRole : '';
   const ph = $('phase');
-  ph.textContent = s.kind === 'lobby' ? 'Lobby — waiting for the host to start Day 0' : s.label + (s.open ? ' — open' : ' — closed');
+  ph.textContent = s.kind === 'lobby' ? 'Lobby — waiting for the host to start the game' : s.label + (s.open ? ' — open' : ' — closed');
   ph.className = 'status ' + (s.open ? 'open' : 'closed');
   const ol = $('onlineLine');
   ol.textContent = 'Online (' + s.online.length + '): ';
@@ -258,7 +259,8 @@ $('submitBtn').onclick = async () => {
 };
 
 function renderHost(s) {
-  $('startBtn').textContent = 'Start ' + s.nextLabel;
+  $('startBtn').textContent = s.idx < 0 ? 'Start Game' : 'Start ' + s.nextLabel;
+  $('endGameBtn').classList.toggle('hidden', s.idx < 0);
   $('startBtn').disabled = s.open || s.needsResolve;
   $('endBtn').disabled = !s.open;
   $('progress').textContent = s.open
@@ -315,6 +317,7 @@ $('saveRoles').onclick = async () => {
 };
 $('startBtn').onclick = () => hostAction('/api/host/start');
 $('endBtn').onclick = () => hostAction('/api/host/end');
+$('endGameBtn').onclick = () => { if (confirm('End the game? This clears all rounds, roles, messages and deaths, and lets new players join.')) hostAction('/api/host/endgame'); };
 async function hostAction(path) {
   $('hostErr').textContent = '';
   try {
