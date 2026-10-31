@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mafia</title>
+<style>
+  :root { --bg:#1c1417; --panel:#271c20; --line:#4a3238; --text:#efe6df; --muted:#a8968f; --accent:#c9a24b; --danger:#b8454f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.5 Georgia,"Times New Roman",serif; }
+  main { max-width:560px; margin:0 auto; padding:32px 16px; }
+  h1 { font-size:2rem; margin:0 0 4px; }
+  h2 { font-size:1.1rem; margin:0 0 12px; }
+  .sub { color:var(--muted); margin:0 0 24px; }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:18px; margin-bottom:16px; }
+  label { display:block; margin:10px 0 4px; color:var(--muted); font-size:.9rem; }
+  input, select, textarea { width:100%; padding:10px; background:var(--bg); color:var(--text); border:1px solid var(--line); border-radius:4px; font:inherit; }
+  textarea { resize:vertical; }
+  button { padding:10px 16px; margin-top:12px; background:var(--accent); color:#1c1417; border:0; border-radius:4px; font:inherit; font-weight:bold; cursor:pointer; }
+  button.alt { background:transparent; color:var(--text); border:1px solid var(--line); margin-top:0; }
+  button.stop { background:var(--danger); color:#fff; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  :focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; }
+  .top { display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; }
+  .status { font-weight:bold; }
+  .open { color:var(--accent); } .closed { color:var(--muted); }
+  .error { color:var(--danger); min-height:1.4em; margin:8px 0 0; }
+  .note { color:var(--muted); font-size:.9rem; margin:8px 0 0; }
+  .msg { padding:8px 0; border-bottom:1px solid var(--line); }
+  .msg:last-child { border-bottom:0; }
+  .msg b { color:var(--accent); }
+  table { width:100%; border-collapse:collapse; font-size:.95rem; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:normal; }
+  .hidden { display:none; } .scroll { overflow-x:auto; }
+</style>
+</head>
+<body>
+<main>
+  <section id="login">
+    <h1>Mafia</h1>
+    <p class="sub">Log in to join. A new name creates your account.</p>
+    <div class="panel">
+      <label for="name">Name</label>
+      <input id="name" autocomplete="username" maxlength="20">
+      <label for="pw">Password</label>
+      <input id="pw" type="password" autocomplete="current-password">
+      <button id="loginBtn">Log in</button>
+      <p class="error" id="loginErr"></p>
+    </div>
+  </section>
+
+  <section id="game" class="hidden">
+    <div class="top">
+      <div><h1 id="who"></h1><div id="roleLine" style="color:var(--accent)"></div></div>
+      <button class="alt" id="logoutBtn">Log out</button>
+    </div>
+
+    <div class="panel">
+      <div class="status" id="phase"></div>
+      <div class="note" id="onlineLine"></div>
+    </div>
+
+    <!-- Player -->
+    <div class="panel hidden" id="playerPanel">
+      <h2 id="promptTitle"></h2>
+      <div id="pickBox">
+        <label for="pick">Choose a player</label>
+        <select id="pick"></select>
+        <button id="submitBtn">Submit</button>
+      </div>
+      <p class="note" id="mySub"></p>
+      <p class="error" id="subErr"></p>
+    </div>
+    <div class="panel hidden" id="msgPanel"><h2>Messages from the host</h2><div id="msgs"></div></div>
+
+    <!-- Host -->
+    <div class="panel hidden" id="hostPanel">
+      <h2>Host controls</h2>
+      <div class="row">
+        <button id="startBtn"></button>
+        <button id="endBtn" class="stop">End round</button>
+      </div>
+      <p class="note" id="progress"></p>
+      <p class="error" id="hostErr"></p>
+    </div>
+    <div class="panel hidden" id="rolesPanel">
+      <h2>Roles</h2>
+      <div id="roleSetup">
+        <label for="roleList">Role list, one per line. They are handed out at random when Night 1 starts.</label>
+        <textarea id="roleList" rows="6"></textarea>
+        <button id="saveRoles">Save roles</button>
+      </div>
+      <div class="scroll" id="assigned"></div>
+      <p class="note" id="notice"></p>
+    </div>
+    <div class="panel hidden" id="livePanel">
+      <h2 id="liveTitle"></h2>
+      <div class="scroll" id="live"></div>
+    </div>
+    <div class="panel hidden" id="replyPanel">
+      <h2>Message a player</h2>
+      <label for="replyTo">Player</label><select id="replyTo"></select>
+      <label for="replyText">Message</label><input id="replyText" maxlength="300">
+      <button id="sendReply">Send</button>
+      <p class="error" id="replyErr"></p>
+      <div id="sentLog" class="note"></div>
+    </div>
+    <div id="history"></div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let token = localStorage.getItem('mafiaToken');
+let es = null, last = null, rolesDirty = false;
+
+async function post(path, data) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, ...data }) });
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || 'Something went wrong.');
+  return j;
+}
+function table(heads, rows) {
+  const t = document.createElement('table');
+  const h = t.insertRow();
+  heads.forEach(x => { const th = document.createElement('th'); th.textContent = x; h.appendChild(th); });
+  rows.forEach(r => { const row = t.insertRow(); r.forEach(x => (row.insertCell().textContent = x)); });
+  return t;
+}
+// rebuild a dropdown only when its options change, so a pending choice isn't lost
+function fillSelect(sel, items) {
+  const key = items.join('|');
+  if (sel.dataset.key === key) return;
+  const keep = sel.value;
+  sel.innerHTML = '';
+  items.forEach(n => { const o = document.createElement('option'); o.value = o.textContent = n; sel.appendChild(o); });
+  if (items.includes(keep)) sel.value = keep;
+  sel.dataset.key = key;
+}
+
+// ---------- login / logout ----------
+$('loginBtn').onclick = async () => {
+  $('loginErr').textContent = '';
+  try {
+    const j = await post('/api/login', { name: $('name').value, password: $('pw').value });
+    token = j.token; localStorage.setItem('mafiaToken', token); connect();
+  } catch (e) { $('loginErr').textContent = e.message; }
+};
+$('pw').onkeydown = e => { if (e.key === 'Enter') $('loginBtn').click(); };
+$('logoutBtn').onclick = logout;
+function logout() {
+  if (es) es.close();
+  token = null; localStorage.removeItem('mafiaToken');
+  $('game').classList.add('hidden'); $('login').classList.remove('hidden');
+}
+function connect() {
+  if (es) es.close();
+  es = new EventSource('/api/events?token=' + encodeURIComponent(token));
+  es.onmessage = e => { last = JSON.parse(e.data); render(last); };
+  es.onerror = () => { if (es.readyState === EventSource.CLOSED) logout(); };
+  $('login').classList.add('hidden'); $('game').classList.remove('hidden');
+}
+
+// ---------- rendering ----------
+function render(s) {
+  $('who').textContent = s.isHost ? 'Host' : s.me;
+  $('roleLine').textContent = s.myRole ? 'Your role: ' + s.myRole : '';
+  const ph = $('phase');
+  ph.textContent = s.kind === 'lobby' ? 'Lobby — waiting for the host to start Day 0' : s.label + (s.open ? ' — open' : ' — closed');
+  ph.className = 'status ' + (s.open ? 'open' : 'closed');
+  $('onlineLine').textContent = 'Online (' + s.online.length + '): ' + (s.online.join(', ') || 'nobody yet');
+
+  const p = !s.isHost, h = s.isHost;
+  $('playerPanel').classList.toggle('hidden', !p || s.kind === 'lobby');
+  $('msgPanel').classList.toggle('hidden', !p || !s.msgs.length);
+  ['hostPanel', 'rolesPanel'].forEach(id => $(id).classList.toggle('hidden', !h));
+  $('livePanel').classList.toggle('hidden', !(h && s.open && s.kind !== 'role'));
+  $('replyPanel').classList.toggle('hidden', !(h && s.open && s.kind === 'night'));
+  $('history').innerHTML = '';
+  if (p) renderPlayer(s); else renderHost(s);
+}
+
+function renderPlayer(s) {
+  const isRole = s.kind === 'role';
+  $('promptTitle').textContent = isRole ? s.label : s.label + ': choose a player';
+  $('pickBox').classList.toggle('hidden', isRole);
+  fillSelect($('pick'), s.online);
+  $('submitBtn').disabled = !s.open;
+  $('mySub').textContent = isRole ? 'The host is setting up roles. You will see yours when Night 1 starts.'
+    : !s.open ? 'This round is closed. Wait for the host to open the next one.'
+    : s.mySub ? 'Submitted: ' + s.mySub + ' (you can change it until the round ends)' : 'Nothing submitted yet.';
+  $('msgs').innerHTML = '';
+  s.msgs.slice().reverse().forEach(m => {
+    const d = document.createElement('div'); d.className = 'msg';
+    const b = document.createElement('b'); b.textContent = m.label + ': ';
+    d.appendChild(b); d.appendChild(document.createTextNode(m.text)); $('msgs').appendChild(d);
+  });
+}
+$('submitBtn').onclick = async () => {
+  $('subErr').textContent = '';
+  try { await post('/api/submit', { value: $('pick').value }); } catch (e) { $('subErr').textContent = e.message; }
+};
+
+function renderHost(s) {
+  $('startBtn').textContent = 'Start ' + s.nextLabel;
+  $('startBtn').disabled = s.open;
+  $('endBtn').disabled = !s.open;
+  $('progress').textContent = s.open
+    ? 'Submitted so far: ' + Object.keys(s.submissions).length + ' of ' + s.people.length
+    : 'No round is open.';
+
+  // roles
+  $('roleSetup').classList.toggle('hidden', s.idx > 0);
+  if (!rolesDirty) $('roleList').value = s.roleList.join('\n');
+  const assigned = Object.entries(s.roles);
+  $('assigned').innerHTML = '';
+  if (assigned.length) $('assigned').appendChild(table(['Player', 'Role'], assigned));
+  $('notice').textContent = s.notice;
+
+  // live selections for the open round
+  $('liveTitle').textContent = s.label + ': live selections';
+  $('live').innerHTML = '';
+  $('live').appendChild(table(['Sender', 'Role', 'Selected'], s.people.map(n => [n, s.roles[n] || '—', s.submissions[n] || '—'])));
+
+  // reply form
+  fillSelect($('replyTo'), s.people);
+  $('sentLog').textContent = s.sent.slice(-8).reverse().map(m => m.label + ' → ' + m.to + ': ' + m.text).join('\n');
+  $('sentLog').style.whiteSpace = 'pre-wrap';
+
+  // finished rounds
+  s.history.slice().reverse().forEach(r => {
+    const panel = document.createElement('div'); panel.className = 'panel';
+    const hd = document.createElement('h2'); hd.textContent = r.label + ' (finished)'; panel.appendChild(hd);
+    const wrap = document.createElement('div'); wrap.className = 'scroll';
+    wrap.appendChild(table(['Sender', 'Role', 'Selected'], r.entries.map(e => [e.player, e.role, e.choice])));
+    panel.appendChild(wrap); $('history').appendChild(panel);
+  });
+}
+$('roleList').oninput = () => { rolesDirty = true; };
+$('saveRoles').onclick = async () => {
+  $('hostErr').textContent = '';
+  try { await post('/api/host/roles', { roles: $('roleList').value }); rolesDirty = false; } catch (e) { $('hostErr').textContent = e.message; }
+};
+$('startBtn').onclick = () => hostAction('/api/host/start');
+$('endBtn').onclick = () => hostAction('/api/host/end');
+async function hostAction(path) {
+  $('hostErr').textContent = '';
+  try {
+    if (rolesDirty && path.endsWith('start')) await post('/api/host/roles', { roles: $('roleList').value }), rolesDirty = false;
+    await post(path, {});
+  } catch (e) { $('hostErr').textContent = e.message; }
+}
+$('sendReply').onclick = async () => {
+  $('replyErr').textContent = '';
+  try { await post('/api/host/message', { to: $('replyTo').value, text: $('replyText').value }); $('replyText').value = ''; }
+  catch (e) { $('replyErr').textContent = e.message; }
+};
+
+if (token) connect();
+</script>
+</body>
+</html>
